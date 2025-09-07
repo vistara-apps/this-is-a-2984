@@ -6,7 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "build:analyze": "vite build --mode analyze",
+    "build:validate": "npm run build && node scripts/validate-build.js",
+    "preview": "vite preview",
+    "lint": "echo 'Linting skipped - no linter configured'",
+    "type-check": "echo 'Type checking skipped - JavaScript project'",
+    "clean": "rm -rf dist",
+    "build:clean": "npm run clean && npm run build"
   },
   "dependencies": {
     "react": "^18.2.0",
