@@ -1,22 +1,36 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useApp } from '../context/AppContext'
 import { useNavigate } from 'react-router-dom'
+import { useProjects, useVideoGeneration, useFileUpload, useBrandAssets } from '../hooks/useApi'
 import VideoUploader from '../components/VideoUploader'
 import TemplateSelector from '../components/TemplateSelector'
 import LayoutEditor from '../components/LayoutEditor'
 import ProgressTracker from '../components/ProgressTracker'
-import { ArrowLeft, ArrowRight, Wand2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Wand2, AlertCircle, CheckCircle } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 export default function CreateProject() {
   const { state, dispatch } = useApp()
   const navigate = useNavigate()
+  
+  // API hooks
+  const { createProject, loading: projectLoading } = useProjects()
+  const { generateVideo, loading: generationLoading, generationStatus } = useVideoGeneration()
+  const { uploadFile, uploadMultipleFiles, uploadProgress } = useFileUpload()
+  const { brandAssets, loadBrandAssets } = useBrandAssets()
+  
   const [currentStep, setCurrentStep] = useState(1)
   const [projectData, setProjectData] = useState({
-    name: '',
+    projectName: '',
+    description: '',
     files: [],
+    uploadedFiles: [],
     template: null,
+    selectedBrandAssets: [],
+    customizations: {},
     isGenerating: false,
-    progress: 0
+    progress: 0,
+    errors: {}
   })
 
   const steps = [
@@ -26,52 +40,147 @@ export default function CreateProject() {
     { id: 4, title: 'Generate Video', description: 'AI creates your branded video' }
   ]
 
-  const handleFilesChange = (files) => {
+  // Load brand assets on component mount
+  useEffect(() => {
+    loadBrandAssets().catch(err => {
+      console.error('Failed to load brand assets:', err)
+      toast.error('Failed to load brand assets')
+    })
+  }, [loadBrandAssets])
+
+  // Handle file uploads
+  const handleFilesChange = async (files) => {
     setProjectData(prev => ({ ...prev, files }))
+    
+    try {
+      toast.loading('Uploading files...', { id: 'upload' })
+      const uploadedFiles = await uploadMultipleFiles(files, 'content')
+      
+      setProjectData(prev => ({ 
+        ...prev, 
+        uploadedFiles: [...prev.uploadedFiles, ...uploadedFiles]
+      }))
+      
+      toast.success('Files uploaded successfully!', { id: 'upload' })
+    } catch (error) {
+      console.error('File upload failed:', error)
+      toast.error('Failed to upload files', { id: 'upload' })
+    }
   }
 
   const handleTemplateSelect = (template) => {
     setProjectData(prev => ({ ...prev, template }))
+    
+    // Auto-select compatible brand assets
+    if (template && brandAssets.length > 0) {
+      const compatibleAssets = brandAssets.filter(asset => asset.isActive)
+      setProjectData(prev => ({ 
+        ...prev, 
+        selectedBrandAssets: compatibleAssets.map(asset => asset.assetId)
+      }))
+    }
   }
 
-  const handleGenerateVideo = () => {
-    setProjectData(prev => ({ ...prev, isGenerating: true, progress: 0 }))
+  const handleBrandAssetToggle = (assetId) => {
+    setProjectData(prev => ({
+      ...prev,
+      selectedBrandAssets: prev.selectedBrandAssets.includes(assetId)
+        ? prev.selectedBrandAssets.filter(id => id !== assetId)
+        : [...prev.selectedBrandAssets, assetId]
+    }))
+  }
+
+  const handleCustomizationChange = (key, value) => {
+    setProjectData(prev => ({
+      ...prev,
+      customizations: {
+        ...prev.customizations,
+        [key]: value
+      }
+    }))
+  }
+
+  const validateStep = (step) => {
+    const errors = {}
     
-    // Simulate video generation progress
-    const interval = setInterval(() => {
-      setProjectData(prev => {
-        const newProgress = prev.progress + Math.random() * 15
-        if (newProgress >= 100) {
-          clearInterval(interval)
-          
-          // Create project and add to state
-          const newProject = {
-            projectId: Date.now().toString(),
-            userId: state.user.userId,
-            projectName: prev.name || 'Untitled Project',
-            inputContentUrls: prev.files.map(f => f.name),
-            templateId: prev.template?.templateId,
-            status: 'ready',
-            outputVideoUrl: '/generated-video.mp4'
-          }
-          
-          dispatch({ type: 'ADD_PROJECT', payload: newProject })
-          
-          setTimeout(() => {
-            navigate('/projects')
-          }, 1000)
-          
-          return { ...prev, progress: 100, isGenerating: false }
+    switch (step) {
+      case 1:
+        if (!projectData.projectName.trim()) {
+          errors.projectName = 'Project name is required'
         }
-        return { ...prev, progress: newProgress }
+        if (projectData.uploadedFiles.length === 0) {
+          errors.files = 'At least one file is required'
+        }
+        break
+      case 2:
+        if (!projectData.template) {
+          errors.template = 'Please select a template'
+        }
+        break
+      case 3:
+        // Layout customizations are optional
+        break
+    }
+    
+    setProjectData(prev => ({ ...prev, errors }))
+    return Object.keys(errors).length === 0
+  }
+
+  const handleNextStep = () => {
+    if (validateStep(currentStep)) {
+      setCurrentStep(prev => Math.min(prev + 1, 4))
+    }
+  }
+
+  const handlePrevStep = () => {
+    setCurrentStep(prev => Math.max(prev - 1, 1))
+  }
+
+  const handleGenerateVideo = async () => {
+    if (!validateStep(3)) return
+    
+    try {
+      setProjectData(prev => ({ ...prev, isGenerating: true, progress: 0 }))
+      
+      // Create project first
+      const newProject = await createProject({
+        projectName: projectData.projectName,
+        description: projectData.description,
+        templateId: projectData.template.templateId,
+        inputContentUrls: projectData.uploadedFiles.map(file => file.url),
+        brandAssetIds: projectData.selectedBrandAssets,
+        customizations: projectData.customizations,
+        settings: {
+          duration: projectData.template.layoutConfig.duration,
+          resolution: projectData.template.layoutConfig.resolution,
+          fps: projectData.template.layoutConfig.fps || 30,
+          quality: 'high'
+        }
       })
-    }, 500)
+      
+      toast.success('Project created successfully!')
+      
+      // Start video generation
+      await generateVideo(newProject)
+      
+      toast.success('Video generation started!')
+      
+      // Navigate to projects page to monitor progress
+      setTimeout(() => {
+        navigate('/projects')
+      }, 2000)
+      
+    } catch (error) {
+      console.error('Video generation failed:', error)
+      toast.error('Failed to generate video: ' + error.message)
+      setProjectData(prev => ({ ...prev, isGenerating: false, progress: 0 }))
+    }
   }
 
   const canProceed = () => {
     switch (currentStep) {
       case 1:
-        return projectData.files.length > 0
+        return projectData.projectName.trim() && projectData.uploadedFiles.length > 0
       case 2:
         return projectData.template !== null
       case 3:
@@ -80,6 +189,10 @@ export default function CreateProject() {
         return false
     }
   }
+
+  const isLoading = projectLoading || generationLoading || Object.keys(uploadProgress).some(
+    key => uploadProgress[key].status === 'uploading'
+  )
 
   return (
     <div className="p-4 lg:p-8">
@@ -123,21 +236,46 @@ export default function CreateProject() {
           </div>
         </div>
 
-        {/* Project Name */}
-        <div className="mb-8">
-          <div className="bg-surface rounded-lg shadow-card p-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Project Name
-            </label>
-            <input
-              type="text"
-              value={projectData.name}
-              onChange={(e) => setProjectData(prev => ({ ...prev, name: e.target.value }))}
-              placeholder="Enter project name..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-            />
+        {/* Project Details - Only show on step 1 */}
+        {currentStep === 1 && (
+          <div className="mb-8">
+            <div className="bg-surface rounded-lg shadow-card p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Project Name *
+                </label>
+                <input
+                  type="text"
+                  value={projectData.projectName}
+                  onChange={(e) => setProjectData(prev => ({ ...prev, projectName: e.target.value }))}
+                  placeholder="Enter project name..."
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary ${
+                    projectData.errors.projectName ? 'border-red-500' : 'border-gray-300'
+                  }`}
+                />
+                {projectData.errors.projectName && (
+                  <p className="mt-1 text-sm text-red-600 flex items-center">
+                    <AlertCircle className="w-4 h-4 mr-1" />
+                    {projectData.errors.projectName}
+                  </p>
+                )}
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Description (Optional)
+                </label>
+                <textarea
+                  value={projectData.description}
+                  onChange={(e) => setProjectData(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Describe your video project..."
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Step Content */}
         <div className="mb-8">
@@ -213,8 +351,8 @@ export default function CreateProject() {
         {!projectData.isGenerating && (
           <div className="flex items-center justify-between">
             <button
-              onClick={() => setCurrentStep(Math.max(1, currentStep - 1))}
-              disabled={currentStep === 1}
+              onClick={handlePrevStep}
+              disabled={currentStep === 1 || isLoading}
               className="flex items-center px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
@@ -226,14 +364,15 @@ export default function CreateProject() {
                 if (currentStep === 4) {
                   handleGenerateVideo()
                 } else {
-                  setCurrentStep(Math.min(4, currentStep + 1))
+                  handleNextStep()
                 }
               }}
-              disabled={!canProceed()}
+              disabled={!canProceed() || isLoading}
               className="flex items-center px-6 py-2 bg-primary text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {currentStep === 4 ? 'Generate Video' : 'Next'}
-              {currentStep !== 4 && <ArrowRight className="h-4 w-4 ml-2" />}
+              {isLoading ? 'Loading...' : currentStep === 4 ? 'Generate Video' : 'Next'}
+              {currentStep !== 4 && !isLoading && <ArrowRight className="h-4 w-4 ml-2" />}
+              {currentStep === 4 && !isLoading && <Wand2 className="h-4 w-4 ml-2" />}
             </button>
           </div>
         )}
