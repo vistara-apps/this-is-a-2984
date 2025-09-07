@@ -1,4 +1,4 @@
-name: Deploy to Vercel
+name: Build and Test
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -19,7 +19,7 @@ jobs:
         node-version: '22'
         cache: 'npm'
         
-        - name: Install dependencies
+    - name: Install dependencies
       run: npm install
 
     - name: Build application
@@ -27,8 +27,21 @@ jobs:
       env:
         NODE_OPTIONS: --max-old-space-size=4096
         
+    - name: Validate build output
+      run: node scripts/validate-build.js
+        
+    - name: Run tests (if available)
+      run: npm test --if-present
+      
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-files
+        path: dist/
+        retention-days: 7
+        
     - name: Deploy to Vercel (Production)
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && secrets.VERCEL_TOKEN != ''
       uses: amondnet/vercel-action@v25
       with:
         vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -37,7 +50,7 @@ jobs:
         vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
         
     - name: Deploy to Vercel (Preview)
-      if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master'
+      if: (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master') && secrets.VERCEL_TOKEN != ''
       uses: amondnet/vercel-action@v25
       with:
         vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -45,8 +58,17 @@ jobs:
         vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
         vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
         
+    - name: Skip Vercel deployment (missing secrets)
+      if: secrets.VERCEL_TOKEN == ''
+      run: |
+        echo "⚠️ Vercel deployment skipped - missing required secrets"
+        echo "To enable Vercel deployment, configure the following repository secrets:"
+        echo "- VERCEL_TOKEN"
+        echo "- VERCEL_ORG_ID" 
+        echo "- VERCEL_PROJECT_ID"
+        
     - name: Comment PR with deployment URL
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && secrets.VERCEL_TOKEN != ''
       uses: actions/github-script@v7
       with:
         script: |
@@ -66,3 +88,21 @@ jobs:
               \n\nThis preview will be automatically updated when you push new commits to this PR.`
             });
           }
+          
+    - name: Comment PR with build success (no deployment)
+      if: github.event_name == 'pull_request' && secrets.VERCEL_TOKEN == ''
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `✅ **Build Successful!**
+            \n\nThe application built successfully but deployment was skipped due to missing Vercel configuration.
+            \n\nTo enable automatic deployments, configure the following repository secrets:
+            \n- \`VERCEL_TOKEN\`
+            \n- \`VERCEL_ORG_ID\`
+            \n- \`VERCEL_PROJECT_ID\`
+            \n\nYou can run the app locally with \`npm run dev\` after cloning.`
+          });
